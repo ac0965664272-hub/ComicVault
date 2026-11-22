@@ -16,10 +16,24 @@ android {
         versionName = "1.0"
     }
 
+    // 固定簽章：每次編譯出來的 APK 簽章都相同，新版可以直接覆蓋安裝，資料不會消失。
+    // 這把金鑰只給自己用，不要拿去上架 Google Play。
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("comicvault.keystore")
+            storePassword = "comicvault"
+            keyAlias = "comicvault"
+            keyPassword = "comicvault"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("fixed")
         }
     }
     compileOptions {

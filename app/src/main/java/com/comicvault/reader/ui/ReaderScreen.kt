@@ -27,6 +27,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.ViewCarousel
+import androidx.compose.material.icons.outlined.FormatListNumbered
+import com.comicvault.reader.data.chapterLabel
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -91,14 +93,16 @@ enum class ReadMode(val label: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReaderScreen(comic: Comic, onBack: () -> Unit, onPage: (Int) -> Unit) {
+fun ReaderScreen(comic: Comic, startPage: Int, onBack: () -> Unit, onPage: (Int) -> Unit) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("reader", Context.MODE_PRIVATE) }
     var mode by remember {
         mutableStateOf(runCatching { ReadMode.valueOf(prefs.getString("mode", null) ?: "") }.getOrDefault(ReadMode.Vertical))
     }
     val count = comic.pages.size
-    var page by remember(comic.id) { mutableIntStateOf(comic.lastPage.coerceIn(0, (count - 1).coerceAtLeast(0))) }
+    var page by remember(comic.id) { mutableIntStateOf(startPage.coerceIn(0, (count - 1).coerceAtLeast(0))) }
+    var showChapterMenu by remember { mutableStateOf(false) }
+    val chapter = comic.chapterOf(page)
     var showBars by remember { mutableStateOf(true) }
     var showModeMenu by remember { mutableStateOf(false) }
     var jumpTo by remember { mutableStateOf<Int?>(null) }
@@ -145,13 +149,45 @@ fun ReaderScreen(comic: Comic, onBack: () -> Unit, onPage: (Int) -> Unit) {
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             TopAppBar(
-                title = { Text(comic.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Column {
+                        Text(comic.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                        if (comic.chapters.size > 1) {
+                            val sub = comic.chapters.getOrNull(chapter)?.name?.takeIf { it.isNotBlank() && it != chapterLabel(chapter) }
+                            Text(
+                                chapterLabel(chapter) + (sub?.let { " · $it" } ?: ""),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
+                    if (comic.chapters.size > 1) {
+                        Box {
+                            IconButton(onClick = { showChapterMenu = true }) {
+                                Icon(Icons.Outlined.FormatListNumbered, contentDescription = "選擇章節")
+                            }
+                            DropdownMenu(expanded = showChapterMenu, onDismissRequest = { showChapterMenu = false }) {
+                                comic.chapters.forEachIndexed { i, ch ->
+                                    val sub = ch.name.takeIf { it.isNotBlank() && it != chapterLabel(i) }
+                                    DropdownMenuItem(
+                                        text = { Text(chapterLabel(i) + (sub?.let { " · $it" } ?: ""), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingIcon = { RadioButton(selected = i == chapter, onClick = null) },
+                                        onClick = {
+                                            showChapterMenu = false
+                                            jumpTo = comic.chapterStarts[i]
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
                     IconButton(onClick = { showModeMenu = true }) {
                         Icon(Icons.Outlined.ViewCarousel, contentDescription = "閱讀模式")
                     }
@@ -191,8 +227,16 @@ fun ReaderScreen(comic: Comic, onBack: () -> Unit, onPage: (Int) -> Unit) {
                     .navigationBarsPadding()
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                val shown = (sliderPos?.roundToInt() ?: page) + 1
-                Text("$shown / $count", color = Color.White, style = MaterialTheme.typography.labelLarge)
+                val cur = sliderPos?.roundToInt() ?: page
+                val ch = comic.chapterOf(cur)
+                val inChapter = cur - comic.chapterStarts.getOrElse(ch) { 0 } + 1
+                val chSize = comic.chapters.getOrNull(ch)?.pages?.size ?: count
+                Text(
+                    if (comic.chapters.size > 1) "${chapterLabel(ch)}  $inChapter / $chSize　（全書 ${cur + 1} / $count）"
+                    else "${cur + 1} / $count",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                )
                 if (count > 1) {
                     // 日漫模式下滑桿也改成右到左
                     val dir = if (mode == ReadMode.RightToLeft) LayoutDirection.Rtl else LayoutDirection.Ltr

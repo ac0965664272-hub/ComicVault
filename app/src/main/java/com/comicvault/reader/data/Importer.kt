@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.OpenableColumns
@@ -14,11 +15,11 @@ import java.io.IOException
 import java.nio.charset.Charset
 import java.util.zip.ZipInputStream
 
-/** 把各種來源整理成「待匯入清單」 */
+/** 把各種來源讀成 Source（只保留確定是圖片的檔案） */
 object Importer {
 
-    /** 系統檔案選擇器多選的圖片 */
-    fun fromDocuments(ctx: Context, uris: List<Uri>): PreparedImport {
+    /** 系統檔案選擇器多選的圖片 → 一個來源 */
+    fun fromDocuments(ctx: Context, uris: List<Uri>): Source {
         val cr = ctx.contentResolver
         val cands = uris.map { uri ->
             var name = uri.lastPathSegment?.substringAfterLast('/') ?: "image"
@@ -32,17 +33,19 @@ object Importer {
                 }
             }
             Candidate(
-                name = name,
+                path = name,
                 size = size,
+                mime = runCatching { cr.getType(uri) }.getOrNull(),
+                preview = uri,
                 open = { cr.openInputStream(uri) },
                 deleteOriginal = { DocumentsContract.deleteDocument(cr, uri) },
             )
         }
-        return PreparedImport(suggestTitle(cands.map { it.name }), cands)
+        return Source(suggestTitle(cands.map { it.path }), filterImages(cands))
     }
 
-    /** 整個資料夾（含子資料夾、含隱藏檔）。子資料夾名稱也會參與排序，例如 第1話/001.jpg */
-    fun fromTree(ctx: Context, treeUri: Uri): PreparedImport {
+    /** 整個資料夾（含子資料夾、含隱藏檔） */
+    fun fromTree(ctx: Context, treeUri: Uri): Source {
         val cr = ctx.contentResolver
         val rootId = DocumentsContract.getTreeDocumentId(treeUri)
         val rootName = queryName(cr, DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId))
@@ -69,26 +72,28 @@ object Importer {
                     } else if (ImageFiles.isCandidate(name, mime, size)) {
                         val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
                         out += Candidate(
-                            name = prefix + name,
+                            path = prefix + name,
                             size = size,
+                            mime = mime,
+                            preview = docUri,
                             open = { cr.openInputStream(docUri) },
                             deleteOriginal = { DocumentsContract.deleteDocument(cr, docUri) },
                         )
                     }
                 }
             }
-            if (depth < 6) for ((id, name) in dirs) walk(id, "$prefix$name/", depth + 1)
+            if (depth < 8) for ((id, name) in dirs) walk(id, "$prefix$name/", depth + 1)
         }
 
         walk(rootId, "$rootName/", 0)
-        return PreparedImport(cleanTitle(rootName), out)
+        return Source(cleanTitle(rootName), filterImages(out))
     }
 
     /** ZIP / CBZ 壓縮檔，自動嘗試 UTF-8、Big5、GBK 檔名編碼 */
-    fun fromZip(ctx: Context, uri: Uri): PreparedImport {
+    fun fromZip(ctx: Context, uri: Uri): Source {
         val cr = ctx.contentResolver
         val zipName = queryName(cr, uri) ?: "壓縮檔"
-        val tmp = File(ctx.cacheDir, "zip_${System.currentTimeMillis()}").apply { mkdirs() }
+        val tmp = File(ctx.cacheDir, "zip_${System.nanoTime()}").apply { mkdirs() }
         val charsets = listOf("UTF-8", "Big5", "GBK", "ISO-8859-1")
             .mapNotNull { runCatching { Charset.forName(it) }.getOrNull() }
 
@@ -102,15 +107,15 @@ object Importer {
                 break
             }
             lastError = r.exceptionOrNull()
-            if (lastError !is IllegalArgumentException) break // 不是編碼問題就不重試
+            if (lastError !is IllegalArgumentException) break // 不是檔名編碼問題就不重試
         }
         if (result == null) {
             tmp.deleteRecursively()
             throw lastError ?: IOException("無法讀取壓縮檔")
         }
-        return PreparedImport(
-            title = cleanTitle(zipName.substringBeforeLast('.')),
-            candidates = result,
+        return Source(
+            label = cleanTitle(zipName.substringBeforeLast('.')),
+            images = filterImages(result),
             deleteSource = { DocumentsContract.deleteDocument(cr, uri) },
             cleanup = { tmp.deleteRecursively() },
         )
@@ -127,23 +132,25 @@ object Importer {
                     // 用流水號存檔，不使用壓縮檔內的路徑（避免路徑穿越）
                     val f = File(tmp, "e${idx++}")
                     f.outputStream().use { zis.copyTo(it, 64 * 1024) }
-                    list += Candidate(e.name, f.length(), { f.inputStream() }, null)
+                    list += Candidate(e.name.trimStart('/'), f.length(), null, f, { f.inputStream() }, null)
                 }
             }
         }
         return list
     }
 
-    /** 直接用檔案路徑讀取（隱藏相簿掃描結果用，需要「所有檔案存取權」） */
-    fun fromDirectory(ctx: Context, dir: File): PreparedImport {
+    /** 直接用檔案路徑讀取（隱藏相簿掃描結果，需要所有檔案存取權） */
+    fun fromDirectory(ctx: Context, dir: File): Source {
         val out = ArrayList<Candidate>()
         fun walk(d: File, prefix: String, depth: Int) {
             val kids = d.listFiles() ?: return
             for (f in kids) {
                 if (f.isFile && ImageFiles.isCandidate(f.name, null, f.length())) {
                     out += Candidate(
-                        name = prefix + f.name,
+                        path = prefix + f.name,
                         size = f.length(),
+                        mime = null,
+                        preview = f,
                         open = { f.inputStream() },
                         deleteOriginal = {
                             val ok = f.delete()
@@ -156,7 +163,39 @@ object Importer {
             if (depth < 4) for (k in kids) if (k.isDirectory) walk(k, "$prefix${k.name}/", depth + 1)
         }
         walk(dir, "${dir.name}/", 0)
-        return PreparedImport(cleanTitle(dir.name), out)
+        return Source(cleanTitle(dir.name), filterImages(out))
+    }
+
+    /** 只留下真的是圖片的檔案；副檔名不明的會讀檔頭確認 */
+    private fun filterImages(list: List<Candidate>): List<Candidate> = list.filter { c ->
+        when {
+            c.mime?.startsWith("image/") == true -> true
+            ImageFiles.hasImageExt(c.path) -> true
+            !ImageFiles.isCandidate(c.path, c.mime, c.size) -> false
+            else -> runCatching {
+                val b = ByteArray(16)
+                val n = c.open()?.use { it.read(b) } ?: 0
+                n >= 12 && ImageFiles.looksLikeImage(b)
+            }.getOrDefault(false)
+        }
+    }
+
+    /** SAF 選到的資料夾 → 實際路徑（自訂存放位置用） */
+    fun treeUriToFile(treeUri: Uri): File? {
+        val docId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return null
+        if (docId.startsWith("raw:")) return File(docId.removePrefix("raw:"))
+        val parts = docId.split(":", limit = 2)
+        if (parts.size < 2 && !docId.endsWith(":")) return null
+        val volume = parts[0]
+        val rel = parts.getOrElse(1) { "" }
+        val base = if (volume.equals("primary", ignoreCase = true)) {
+            Environment.getExternalStorageDirectory()
+        } else if (volume.matches(Regex("[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}"))) {
+            File("/storage/$volume")
+        } else {
+            return null
+        }
+        return if (rel.isEmpty()) base else File(base, rel)
     }
 
     private fun queryName(cr: ContentResolver, uri: Uri): String? = runCatching {
@@ -165,7 +204,7 @@ object Importer {
         }
     }.getOrNull()
 
-    private fun cleanTitle(s: String): String = s.trimStart('.').trim().ifBlank { s.ifBlank { "新漫畫" } }
+    fun cleanTitle(s: String): String = s.trimStart('.').trim().ifBlank { s.ifBlank { "新漫畫" } }
 
     /** 從檔名猜漫畫名稱：「海賊王_001.jpg」→「海賊王」 */
     fun suggestTitle(names: List<String>): String {

@@ -19,6 +19,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import java.io.File
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,6 +37,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,7 +61,8 @@ fun HiddenScanScreen(vm: MainViewModel, onBack: () -> Unit) {
     val legacyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         granted = HiddenScanner.hasAccess(ctx)
     }
-    LaunchedEffect(granted) {
+    val picked = remember { mutableStateListOf<String>() }
+    LaunchedEffect(granted, vm.hiddenFolders == null) {
         if (granted && vm.hiddenFolders == null) vm.scanHidden()
     }
 
@@ -75,6 +83,19 @@ fun HiddenScanScreen(vm: MainViewModel, onBack: () -> Unit) {
                     }
                 },
             )
+        },
+        bottomBar = {
+            if (picked.isNotEmpty()) {
+                Surface(tonalElevation = 3.dp) {
+                    Button(
+                        onClick = {
+                            vm.prepare(ImportSource.Dirs(picked.map { File(it) }), null, fromHidden = true)
+                            picked.clear()
+                        },
+                        modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+                    ) { Text("匯入選取的 ${picked.size} 個資料夾") }
+                }
+            }
         },
     ) { pad ->
         val folders = vm.hiddenFolders
@@ -121,7 +142,7 @@ fun HiddenScanScreen(vm: MainViewModel, onBack: () -> Unit) {
                 else -> LazyColumn {
                     item {
                         Text(
-                            "找到 ${folders.size} 個相簿看不到的資料夾，點一下即可匯入成漫畫：",
+                            "找到 ${folders.size} 個相簿看不到、而且有圖片的資料夾。勾選後按下方按鈕，可一次匯入多部：",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                         )
@@ -131,6 +152,12 @@ fun HiddenScanScreen(vm: MainViewModel, onBack: () -> Unit) {
                             headlineContent = { Text(f.path, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                             supportingContent = { Text("${f.imageCount} 張 · ${f.reason}") },
                             leadingContent = {
+                                val path = f.dir.absolutePath
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = path in picked,
+                                    onCheckedChange = { if (it) picked.add(path) else picked.remove(path) },
+                                )
                                 AsyncImage(
                                     model = f.preview,
                                     contentDescription = null,
@@ -140,8 +167,12 @@ fun HiddenScanScreen(vm: MainViewModel, onBack: () -> Unit) {
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(MaterialTheme.colorScheme.surfaceVariant),
                                 )
+                                }
                             },
-                            modifier = Modifier.clickable { vm.prepare(ImportSource.Dir(f.dir), null) },
+                            modifier = Modifier.clickable {
+                                val path = f.dir.absolutePath
+                                if (path in picked) picked.remove(path) else picked.add(path)
+                            },
                         )
                     }
                 }
