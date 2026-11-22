@@ -295,13 +295,7 @@ fun DetailScreen(
         )
     }
     if (moving) {
-        LocationPickerDialog(
-            title = "搬遷到…",
-            locations = vm.locations,
-            currentPaths = setOf(comic.root.absolutePath),
-            onDismiss = { moving = false },
-            onPick = { vm.move(listOf(comic.id), it); moving = false },
-        )
+        MoveDialog(vm = vm, ids = listOf(comic.id), onDismiss = { moving = false })
     }
     if (deleting) {
         AlertDialog(

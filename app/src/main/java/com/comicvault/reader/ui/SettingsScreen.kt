@@ -126,7 +126,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
                         }
                         val others = vm.comics.count { it.root.absolutePath != loc.path }
                         OutlinedButton(onClick = { moveAllTo = loc }, enabled = others > 0) {
-                            Text("全部搬到這裡（$others 部）")
+                            Text(if (others > 0) "搬到這裡（其他位置 $others 部）" else "全部都在這裡")
                         }
                     }
                 }
@@ -165,23 +165,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit) {
     }
 
     moveAllTo?.let { loc ->
-        AlertDialog(
-            onDismissRequest = { moveAllTo = null },
-            title = { Text("全部搬到「${loc.label}」？") },
-            text = {
-                Text(
-                    "會把其他位置的 ${vm.comics.count { it.root.absolutePath != loc.path }} 部漫畫搬過來，" +
-                        "跨磁碟（例如 SD 卡）需要複製，可能要花一點時間。之後新匯入的漫畫也會存到這裡。"
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    vm.setDefaultRoot(loc)
-                    vm.moveAll(loc)
-                    moveAllTo = null
-                }) { Text("開始搬遷") }
-            },
-            dismissButton = { TextButton(onClick = { moveAllTo = null }) { Text("取消") } },
+        MoveDialog(
+            vm = vm,
+            ids = vm.comics.map { it.id },
+            initialTarget = loc,
+            onDismiss = { moveAllTo = null },
         )
     }
 

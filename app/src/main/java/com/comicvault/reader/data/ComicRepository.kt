@@ -127,14 +127,14 @@ class ComicRepository(private val context: Context) {
     // ───────────────────────────── 漫畫
 
     fun list(): List<Comic> {
-        val all = ArrayList<Comic>()
-        val seen = HashSet<String>()
+        val found = ArrayList<Comic>()
         for (loc in locations()) {
             val dirs = runCatching { loc.root.listFiles { f -> f.isDirectory } }.getOrNull() ?: continue
-            for (d in dirs) {
-                val c = load(d) ?: continue
-                if (seen.add(c.id)) all += c
-            }
+            for (d in dirs) found += load(d) ?: continue
+        }
+        // 同一部出現在兩個位置（舊版搬遷沒刪乾淨）時，用最新的那份
+        val all = found.groupBy { it.id }.values.map { copies ->
+            copies.maxByOrNull { File(it.dir, META).lastModified() } ?: copies.first()
         }
         synchronized(dirCache) {
             dirCache.clear()
@@ -279,36 +279,76 @@ class ComicRepository(private val context: Context) {
 
     // ───────────────────────────── 搬遷
 
-    /** 把漫畫整個資料夾搬到另一個存放位置。同一個磁碟會直接改名，跨磁碟（例如到 SD 卡）會複製後刪除。 */
-    fun moveComic(c: Comic, targetRoot: File, onFile: () -> Unit): Boolean {
-        if (!ensureRoot(targetRoot)) return false
+    enum class MoveResult { Moved, AlreadyThere, MovedSourceLeft, Failed }
+
+    /**
+     * 把漫畫整個資料夾搬到另一個存放位置，搬完會刪除原本的檔案。
+     * 同一個磁碟直接改名；跨磁碟（例如到 SD 卡）先複製、逐一核對大小，再刪除原檔。
+     */
+    fun moveComic(c: Comic, targetRoot: File, onFile: () -> Unit): MoveResult {
         val dest = File(targetRoot, c.id)
-        if (dest.absolutePath == c.dir.absolutePath) return true
-        if (dest.exists()) return false
+        if (dest.absolutePath == c.dir.absolutePath) return MoveResult.AlreadyThere
+        if (!ensureRoot(targetRoot)) return MoveResult.Failed
+
+        // 目的地已經有一份（例如上次搬到一半）：完整就直接用，不完整就重來
+        if (dest.exists()) {
+            if (isCompleteCopy(c, dest)) {
+                repeat(c.pages.size) { onFile() }
+                return finishMove(c, dest)
+            }
+            dest.deleteRecursively()
+        }
+
         if (c.dir.renameTo(dest)) {
             repeat(c.pages.size) { onFile() }
             synchronized(dirCache) { dirCache[c.id] = dest }
-            return true
+            return MoveResult.Moved
         }
-        if (!dest.mkdirs()) return false
-        val ok = runCatching {
+
+        if (!dest.mkdirs() && !dest.isDirectory) return MoveResult.Failed
+        val copied = runCatching {
             val files = c.dir.listFiles() ?: emptyArray()
             for (f in files) {
-                if (!f.isFile) continue
+                if (!f.isFile || f.name.endsWith(".tmp")) continue
                 val out = File(dest, f.name)
                 f.copyTo(out, overwrite = true, bufferSize = 64 * 1024)
-                if (out.length() != f.length()) error("複製不完整")
+                if (out.length() != f.length()) error("複製不完整：${f.name}")
                 if (f.name != META) onFile()
             }
             true
         }.getOrDefault(false)
-        if (!ok) {
+        if (!copied || !isCompleteCopy(c, dest)) {
             dest.deleteRecursively()
-            return false
+            return MoveResult.Failed
         }
-        c.dir.deleteRecursively()
+        return finishMove(c, dest)
+    }
+
+    /** 目的地檔案都齊全後，刪掉原本的資料夾 */
+    private fun finishMove(c: Comic, dest: File): MoveResult {
         synchronized(dirCache) { dirCache[c.id] = dest }
-        return true
+        // 先刪 meta.json，就算後面有檔案刪不掉，舊位置也不會再被當成一部漫畫
+        File(c.dir, META).delete()
+        c.dir.deleteRecursively()
+        if (c.dir.exists()) {
+            c.dir.listFiles()?.forEach { it.delete() }
+            c.dir.delete()
+        }
+        return if (c.dir.exists()) MoveResult.MovedSourceLeft else MoveResult.Moved
+    }
+
+    private fun isCompleteCopy(c: Comic, dest: File): Boolean {
+        if (load(dest)?.id != c.id) return false
+        return c.pages.all { p ->
+            val src = c.fileOf(p)
+            val dst = File(dest, p.file)
+            dst.isFile && (!src.exists() || dst.length() == src.length())
+        }
+    }
+
+    /** 每部漫畫的頁數與各頁檔案大小（偵測重複匯入用） */
+    fun fingerprints(): List<com.comicvault.reader.util.Fingerprint> = list().map { c ->
+        com.comicvault.reader.util.Fingerprint(c.id, c.title, c.pages.map { c.fileOf(it).length() })
     }
 
     // ───────────────────────────── 匯入

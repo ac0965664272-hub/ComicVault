@@ -356,14 +356,11 @@ fun LibraryScreen(
     }
 
     if (showMove) {
-        LocationPickerDialog(
-            title = "搬遷 ${selected.size} 部漫畫到…",
-            locations = vm.locations,
-            currentPaths = selectedComics.map { it.root.absolutePath }.toSet(),
-            onDismiss = { showMove = false },
-            onPick = { loc ->
+        MoveDialog(
+            vm = vm,
+            ids = selected.toList(),
+            onDismiss = {
                 showMove = false
-                vm.move(selected.toList(), loc)
                 selected.clear()
             },
         )

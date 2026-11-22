@@ -25,6 +25,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import com.comicvault.reader.util.NaturalOrder
 import com.comicvault.reader.util.Search
+import com.comicvault.reader.util.DuplicateMatch
+import com.comicvault.reader.util.Duplicates
+import com.comicvault.reader.util.Fingerprint
 
 sealed interface ImportSource {
     data class Docs(val uris: List<Uri>) : ImportSource
@@ -34,10 +37,31 @@ sealed interface ImportSource {
 }
 
 /** 匯入前的確認畫面狀態 */
-class ImportSession(val sources: List<Source>, val targetId: String?, val fromHidden: Boolean) {
+class ImportSession(
+    val sources: List<Source>,
+    val targetId: String?,
+    val fromHidden: Boolean,
+    private val existing: List<Fingerprint> = emptyList(),
+) {
     /** true：同一層、名稱像章節的子資料夾合成同一部的各話 */
     var chapterMode by mutableStateOf(true)
     val plans: List<PlannedComic> by derivedStateOf { Detector.plan(sources, chapterMode) }
+
+    /** 每個待匯入項目是否和書庫裡（或這次匯入的其他項目）重複 */
+    val duplicates: Map<String, DuplicateMatch> by derivedStateOf {
+        val out = HashMap<String, DuplicateMatch>()
+        val seen = ArrayList<Fingerprint>()
+        for (p in plans) {
+            val sizes = p.chapters.flatMap { ch -> ch.items.map { it.size } }
+            val m = Duplicates.find(p.title, sizes, existing)
+                ?: Duplicates.find(p.title, sizes, seen)?.let {
+                    DuplicateMatch(it.id, it.title, it.exact, "和這次匯入的「${it.title}」" + if (it.exact) "內容相同" else "相似")
+                }
+            if (m != null) out[p.key] = m
+            seen += Fingerprint(p.key, p.title, sizes)
+        }
+        out
+    }
     fun cleanup() = sources.forEach { runCatching { it.cleanup() } }
 }
 
@@ -126,7 +150,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 message = (listOf("沒有找到含有圖片的資料夾或檔案") + errors).joinToString("\n")
             } else {
                 if (errors.isNotEmpty()) message = "部分來源讀取失敗：\n" + errors.joinToString("\n")
-                session = ImportSession(usable, targetId, fromHidden)
+                val existing = withContext(Dispatchers.IO) { runCatching { repo.fingerprints() }.getOrDefault(emptyList()) }
+                session = ImportSession(usable, targetId, fromHidden, existing)
             }
         }
     }
@@ -215,13 +240,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val total = list.sumOf { it.pages.size }.coerceAtLeast(1)
         var done = 0
         var ok = 0
+        var left = 0
         var fail = 0
         for (c in list) {
-            if (repo.moveComic(c, target.root) { done++; progress(done.toFloat() / total) }) ok++ else fail++
+            when (repo.moveComic(c, target.root) { done++; progress(done.toFloat() / total) }) {
+                ComicRepository.MoveResult.Moved, ComicRepository.MoveResult.AlreadyThere -> ok++
+                ComicRepository.MoveResult.MovedSourceLeft -> { ok++; left++ }
+                ComicRepository.MoveResult.Failed -> fail++
+            }
         }
         buildString {
-            append("已搬遷 $ok 部到「${target.label}」")
-            if (fail > 0) append("\n$fail 部搬遷失敗（空間不足、沒有權限或已存在）")
+            append("已搬遷 $ok 部到「${target.label}」，原位置的檔案已刪除")
+            if (left > 0) append("\n$left 部的原檔案沒能完全刪除（不影響使用，可手動清除）")
+            if (fail > 0) append("\n$fail 部搬遷失敗（空間不足或沒有權限），原檔案保留不動")
         }
     }
 

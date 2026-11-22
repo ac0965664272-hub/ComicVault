@@ -59,8 +59,10 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
     BackHandler { onCancel() }
     val plans = session.plans
     val target = session.targetId?.let { id -> vm.comics.find { it.id == id } }
-    // 預設全選；用 key 記錄「取消勾選」的項目
-    val unchecked = remember(session) { mutableStateMapOf<String, Boolean>() }
+    // 使用者手動勾選／取消的項目；沒動過的：完全重複的預設不勾，其他預設勾
+    val choice = remember(session) { mutableStateMapOf<String, Boolean>() }
+    val dups = session.duplicates
+    fun isChecked(key: String) = choice[key] ?: (dups[key]?.exact != true)
     val titles = remember(session) { mutableStateMapOf<String, String>() }
     val authors = remember(session) { mutableStateMapOf<String, String>() }
     var category by remember(session) { mutableStateOf<String?>(null) }
@@ -70,7 +72,7 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
     var locMenu by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<PlannedComic?>(null) }
 
-    val selected = plans.filter { unchecked[it.key] != true }
+    val selected = plans.filter { isChecked(it.key) }
     val newChapters = selected.sumOf { it.chapters.size }
     val room = if (target != null) MAX_CHAPTERS - target.chapters.size else MAX_CHAPTERS
     val overLimit = target != null && newChapters > room
@@ -122,6 +124,14 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
         ) {
             item {
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (dups.isNotEmpty()) {
+                        val exact = dups.values.count { it.exact }
+                        Text(
+                            "⚠ 偵測到 ${dups.size} 部可能重複" + if (exact > 0) "，其中 $exact 部內容完全相同，已自動取消勾選" else "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     Text(
                         "已自動略過沒有圖片的資料夾，圖片依檔名排序。",
                         style = MaterialTheme.typography.bodySmall,
@@ -171,12 +181,18 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
                 }
                 HorizontalDivider()
                 Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { unchecked.clear() }) { Text("全選") }
-                    TextButton(onClick = { plans.forEach { unchecked[it.key] = true } }) { Text("全不選") }
+                    TextButton(onClick = { plans.forEach { choice[it.key] = true } }) { Text("全選") }
+                    TextButton(onClick = { plans.forEach { choice[it.key] = false } }) { Text("全不選") }
+                    if (dups.isNotEmpty()) {
+                        TextButton(onClick = {
+                            plans.forEach { choice[it.key] = dups[it.key] == null }
+                        }) { Text("只選不重複的") }
+                    }
                 }
             }
             items(plans, key = { it.key }) { p ->
-                val checked = unchecked[p.key] != true
+                val checked = isChecked(p.key)
+                val dup = dups[p.key]
                 val title = titles[p.key] ?: p.title
                 val author = authors[p.key] ?: p.author
                 ListItem(
@@ -192,11 +208,23 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
                         } else {
                             "1 話"
                         }
-                        Text("${p.imageCount} 張 · $chapterInfo", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Column {
+                            Text("${p.imageCount} 張 · $chapterInfo", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (dup != null) {
+                                Text(
+                                    (if (dup.exact) "⚠ 重複：" else "⚠ 可能重複：") +
+                                        if (dup.reason.startsWith("和這次")) dup.reason else "書庫已有「${dup.title}」（${dup.reason}）",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
                     },
                     leadingContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = checked, onCheckedChange = { unchecked[p.key] = !it })
+                            Checkbox(checked = checked, onCheckedChange = { choice[p.key] = it })
                             AsyncImage(
                                 model = p.preview,
                                 contentDescription = null,
@@ -213,7 +241,7 @@ fun ImportScreen(vm: MainViewModel, session: ImportSession, onCancel: () -> Unit
                     } else {
                         null
                     },
-                    modifier = Modifier.clickable { unchecked[p.key] = checked },
+                    modifier = Modifier.clickable { choice[p.key] = !checked },
                 )
             }
         }
